@@ -43,11 +43,13 @@ def build_query(min_length: int, max_length: int, max_results: int) -> dict:
                     },
                 },
                 {
-                    # Residue count lower bound
+                    # Residue count lower bound. Note: polymer_monomer_count (no
+                    # min/max suffix) exists in RCSB's schema but isn't search-enabled;
+                    # the queryable per-entry fields are the _minimum/_maximum variants.
                     "type": "terminal",
                     "service": "text",
                     "parameters": {
-                        "attribute": "rcsb_entry_info.polymer_monomer_count",
+                        "attribute": "rcsb_entry_info.polymer_monomer_count_minimum",
                         "operator": "greater_or_equal",
                         "value": min_length,
                     },
@@ -57,7 +59,7 @@ def build_query(min_length: int, max_length: int, max_results: int) -> dict:
                     "type": "terminal",
                     "service": "text",
                     "parameters": {
-                        "attribute": "rcsb_entry_info.polymer_monomer_count",
+                        "attribute": "rcsb_entry_info.polymer_monomer_count_maximum",
                         "operator": "less_or_equal",
                         "value": max_length,
                     },
