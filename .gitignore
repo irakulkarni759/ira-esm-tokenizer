@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 data/raw_pdb/
 .venv/
+model/__pycache__/
+data/__pycache__/
