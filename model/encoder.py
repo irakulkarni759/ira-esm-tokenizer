@@ -92,6 +92,19 @@ class GeometricAttentionLayer(nn.Module):
 
         self.norm = nn.LayerNorm(dim)
 
+        # Xavier (Glorot) initialization: picks each layer's starting random
+        # weights based on both its input and output size, so signal
+        # variance stays roughly stable as data passes through many stacked
+        # layers. PyTorch's nn.Linear default is Kaiming/He initialization,
+        # which is tuned more for ReLU-style networks -- Xavier is the more
+        # standard choice for layers without a ReLU in between, which is
+        # what we have here (pure attention, no feed-forward block yet).
+        # Biases start at zero, standard practice -- Xavier's variance
+        # formula is specifically about the weight matrix, not the bias.
+        for layer in [self.to_q, self.to_k, self.to_v, self.to_out, self.pair_to_bias, self.pair_to_value]:
+            nn.init.xavier_uniform_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
     def forward(self, x: torch.Tensor, pair_feats: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         x:          (B, L, dim)   -- current per-residue features
