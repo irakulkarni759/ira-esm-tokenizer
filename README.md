@@ -135,12 +135,18 @@ Token quality, 92 validation structures, 14,457 residues.
 
 | Question | Number | Reading |
 |---|---|---|
-| Do codes mean secondary structure? | purity 0.722 against a 0.433 baseline, NMI 0.167 | Yes, well above chance |
+| Do codes mean secondary structure? | NMI 0.167 | Weakly. Purity reads 0.722 against a 0.433 baseline but should not be quoted, see below |
 | Do codes mean local geometry? | NMI 0.456 | Yes, more strongly than secondary structure |
 | Are codes consistent across proteins? | 490.9 codes per distinct local shape | No, the same shape gets tokenized many different ways |
 | Do tokens leak which protein they came from? | NMI 0.479 | Yes, and this tracks codebook size more than receptive field |
 
-**Two honest caveats**, both of which should stay attached to these numbers.
+**Three honest caveats**, all of which should stay attached to these numbers.
+
+At 14,457 residues over 3,489 live codes, each code holds about 4.1 residues. Secondary-structure
+purity of 0.722 is therefore inflated, since with four residues per code purity is mostly measuring
+how few residues a code has rather than whether the code means anything. NMI is the honest number
+here. The deeper reading is that at 4096 codes the tokens behave more like serial numbers than like
+a vocabulary, because nothing in training rewards reuse and codes are never scarce.
 
 The protein-identity leak is not purely a global-attention story. NMI is 0.479 for global-4096 and
 0.459 for knn16, nearly identical, while the 512-code run sits at 0.248. That tracks codebook
