@@ -112,52 +112,106 @@ Checkpoints are written every epoch, best and last kept separately.
 | Auxiliary heads | Distance, error and confidence trained alongside | Reconstruction only | Not measurable from a checkpoint, the heads were never there |
 | Decoder | 6D rotation frames, plain attention | Same | Not a source of difference by design |
 
-The global receptive field is the substantive one. It makes reconstruction easier during training
-while making each individual token mean less, because a token can absorb information from residues
-200 positions away and is therefore not guaranteed to transfer between proteins the way a purely
-local token is.
+The global receptive field is the substantive one, and the ablation below settles it. Restricting
+the encoder to ESM-3's 16 neighbours costs 0.05 A of reconstruction and improves every measure of
+what the tokens mean. Global attention makes reconstruction marginally easier while making each
+individual token mean less, because a token can absorb information from residues 200 positions away
+and therefore does not transfer between proteins the way a purely local token does.
 
 ---
 
 ## Results
 
-Best run, 829 structures, 200 epochs, roughly 9 seconds per epoch.
+Three arms of one ablation, 200 epochs each, identical data, decoder, optimizer and seed, with
+exactly one knob changed per arm. 829 train / 92 val structures, 14,457 val residues, roughly
+9 seconds per epoch.
 
-| Metric | Value |
-|---|---|
-| Train reconstruction | 6.654 A |
-| Validation reconstruction | 7.034 A |
-| VQ loss | 0.145 |
-| Codes in use | 4096 / 4096 |
-| Codebook perplexity | 3077 |
+- **4096**, the reference build. Global attention, 4096-code codebook.
+- **512**, changes only vocabulary size.
+- **knn16**, changes only receptive field, to ESM-3's 16 nearest spatial neighbours.
 
-Token quality, 92 validation structures, 14,457 residues.
+### Reconstruction is flat
 
-| Question | Number | Reading |
-|---|---|---|
-| Do codes mean secondary structure? | NMI 0.167 | Weakly. Purity reads 0.722 against a 0.433 baseline but should not be quoted, see below |
-| Do codes mean local geometry? | NMI 0.456 | Yes, more strongly than secondary structure |
-| Are codes consistent across proteins? | 490.9 codes per distinct local shape | No, the same shape gets tokenized many different ways |
-| Do tokens leak which protein they came from? | NMI 0.479 | Yes, and this tracks codebook size more than receptive field |
+| | 4096 | 512 | knn16 |
+|---|---|---|---|
+| Validation reconstruction | 7.034 A | 7.051 A | 7.087 A |
+| Train reconstruction | 6.65 A | 6.96 A | 6.70 A |
+| Train/val gap | 0.38 | 0.09 | 0.38 |
 
-**Three honest caveats**, all of which should stay attached to these numbers.
+An 8x codebook and a whole-chain receptive field together buy 0.05 A, which is noise. All three
+curves are flat from epoch 175 to 200, so this is a real tie rather than one arm being cut short.
 
-At 14,457 residues over 3,489 live codes, each code holds about 4.1 residues. Secondary-structure
-purity of 0.722 is therefore inflated, since with four residues per code purity is mostly measuring
-how few residues a code has rather than whether the code means anything. NMI is the honest number
-here. The deeper reading is that at 4096 codes the tokens behave more like serial numbers than like
-a vocabulary, because nothing in training rewards reuse and codes are never scarce.
+The read is not that codebook size does not matter. It is that **at 7 A nothing downstream of the
+encoder is the binding constraint**. The encoder is 128 dimensions, 4 layers, 4 heads, with no
+feed-forward block, and every residue starts from one shared vector with all differentiation
+injected through `pair_to_value`. That is the ceiling all three arms hit from different directions.
+The train/val gaps say where the extra capacity went, since the two big codebooks memorised the
+extra 0.3 A rather than generalising it.
 
-The protein-identity leak is not purely a global-attention story. NMI is 0.479 for global-4096 and
-0.459 for knn16, nearly identical, while the 512-code run sits at 0.248. That tracks codebook
-capacity, not receptive field. A 4096-code book over 14,457 residues has enough room to memorise
-chains.
+### Token quality, where the arms actually separate
 
-The transplant probe is not currently working as a discriminator. knn16 scores 0.025, worse than
+| | 4096 | 512 | knn16 | Better |
+|---|---|---|---|---|
+| VQ loss | 0.145 | 0.091 | 0.050 | lower |
+| Codes live (val) | 3458 / 4096 | 508 / 512 | 3139 / 4096 | higher |
+| Usage evenness | 0.776 | 0.931 | 0.758 | higher |
+| Relative quantization error | 0.061 | 0.039 | 0.069 | lower |
+| SSE purity | 0.722 | 0.559 | 0.813 | higher |
+| NMI(code, SSE) | 0.168 | 0.053 | 0.229 | higher |
+| NMI(code, local geometry) | 0.458 | 0.255 | 0.466 | higher |
+| Codes per distinct local shape | 479.3 | n/a | 353.8 | lower |
+| NMI(code, protein identity) | 0.480 | 0.251 | 0.463 | lower |
+| Locality agreement | 0.001 | n/a | 1.000 | n/a |
+
+### The headline
+
+**knn16 wins.** It ties on reconstruction and wins on every semantic measure, against the same
+4096-code vocabulary, so the comparison is fair.
+
+Clipping the global model to 16 neighbours leaves only 1 token in 1000 unchanged. Global attention
+is not being used occasionally for long-range contacts, it is being used constantly, for every
+residue, and it makes the tokens **worse** by every measure of what a token means. That is the
+central result of the project.
+
+The mechanism is visible in the VQ loss. knn16 sits at 0.050 against 4096's 0.145, a 3x lower
+quantization cost on an identical codebook, and it starts near 0.6 before a single training step
+while the global arms start at 10 to 15. A locally-restricted encoder produces latents that are
+inherently more clusterable. Whole-chain attention aggregates over hundreds of residues, so every
+residue's vector gets contaminated by its particular protein and the clusters smear.
+
+### Four caveats that must stay attached to these numbers
+
+**Purity only compares fairly at similar code counts.** It inflates automatically as codes are
+added. 4096 against knn16 is fair, 3458 codes against 3139. Any comparison against 512 is not, so
+512's 0.559 should be read as its own row and not as a loss.
+
+**The identity leak tracks codebook size, not receptive field.** 0.480 for global-4096 against
+0.463 for knn16 is nearly no change, while 512 sits at 0.251. A 4096-code book over 14,457 residues
+simply has the capacity to memorise chains. Attributing the leak to global attention would
+contradict these numbers.
+
+**The 512 run nearly died and the revival mechanism saved it.** Perplexity crashed to about 3 codes
+in use around epoch 4 to 6, which is textbook codebook collapse and normally unrecoverable. It came
+back to roughly 480 by epoch 50 because of `initialize_codebook` and `revive_dead_codes`. This
+reframes the gradient-versus-EMA point. The dead-code cost was not paid, it was engineered around.
+
+**The transplant probe is not working as a discriminator.** knn16 scores 0.025, worse than
 global-4096's 0.015, when a 16-neighbour encoder should score near 1.0 by construction. The window
-is built from a contiguous sequence stretch rather than from spatial neighbours, which likely
-accounts for more of the shortfall than the write-up allows. Either rebuild the window spatially or
-report probe 1 as the receptive-field evidence and drop probe 2.
+is a contiguous sequence stretch rather than a spatial neighbourhood, which likely accounts for most
+of the shortfall. Use probe 1 for the receptive-field argument and either rebuild probe 2 spatially
+or retire it.
+
+### One more thing the curves show
+
+Codebook perplexity goes flat at about epoch 75 in all three arms, while reconstruction keeps
+improving until about epoch 150. For the second half of training the vocabulary was frozen and all
+the gains came from the encoder and decoder learning to use it better. That is the same finding from
+another angle, since the vocabulary settles early and then stops being what matters.
+
+A note on precision. Numbers from the standalone `analyze_codebook.py` pass and the `compare_runs.py`
+pass differ in the third digit (3489 against 3458 live codes, 490.9 against 479.3 codes per shape)
+because they subsample structures differently. The table above uses the `compare_runs.py` values so
+that every column comes from one pass.
 
 ---
 
@@ -166,7 +220,7 @@ report probe 1 as the receptive-field evidence and drop probe 2.
 Build the dataset.
 
 ```bash
-python data/fetch_pdb_ids.py --out data/pdb_ids.txt --max-results 2000
+python data/fetch_pdb_ids.py --out-file data/pdb_ids.txt --min-length 50 --max-length 300 --max-results 2000
 python data/download_pdbs.py --id-list data/pdb_ids.txt --out-dir data/raw_pdb
 python data/parse_structures.py --pdb-dir data/raw_pdb --out-dir data/parsed
 ```
@@ -232,7 +286,15 @@ notebooks/
 
 ## Open
 
+- **knn16 at 512 codes, highest priority.** Both knobs have been varied alone and never together.
+  This is the missing corner of the 2x2, and it is where the best configuration probably sits, with
+  local semantics plus a healthy codebook plus no identity leak.
+- A codebook-size sweep at 1024 and 2048, since two points make a line and three make a trend.
 - EMA against gradient codebook, arm built, run not yet scored.
+- A final LayerNorm on the encoder output. Evidence in hand but not applied, since encoder outputs
+  have norm around 227 while the codebook initialises near 0.23. A test on synthetic data gave
+  val 6.66 A against 7.50 A and VQ loss 0.043 against 4.4 over 120 epochs. This would change the
+  encoder, so it is a deliberate call rather than a cleanup.
 - Bigger model, `--dim 256 --num-layers 6`, GPU headroom exists.
 - More structures, past 1000, best return per unit effort.
 - Unclamped FAPE on a fraction of batches, to get signal on global arrangement.
