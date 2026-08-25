@@ -41,8 +41,15 @@ def build_frames(coords: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     translations = ca
 
     # First axis: the direction from CA toward N, normalized to unit length.
+    # The .clamp(min=1e-8) on every norm below is not cosmetic. collate_fn
+    # pads short structures with ZERO coordinates, so a padded position has
+    # n == ca == c == 0, giving a zero-length v1 and a 0/0 = NaN axis. NaN
+    # then spreads everywhere downstream, including into real residues (it
+    # survives being multiplied by a zero attention weight), so masking
+    # alone does not contain it. Clamping makes padded frames harmlessly
+    # zero instead of NaN, and the masks discard them as intended.
     v1 = n - ca
-    e1 = v1 / v1.norm(dim=-1, keepdim=True)
+    e1 = v1 / v1.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
     # Second axis: start from the CA->C direction, then Gram-Schmidt it --
     # subtract out whatever part of it points along e1, so e1 and e2 end
@@ -50,7 +57,7 @@ def build_frames(coords: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # form a valid (orthogonal) coordinate system.
     v2 = c - ca
     v2 = v2 - (v2 * e1).sum(dim=-1, keepdim=True) * e1
-    e2 = v2 / v2.norm(dim=-1, keepdim=True)
+    e2 = v2 / v2.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
     # Third axis: perpendicular to both e1 and e2, via the cross product --
     # completes a valid right-handed 3D coordinate system.

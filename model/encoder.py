@@ -49,6 +49,39 @@ def pairwise_features(coords: torch.Tensor) -> torch.Tensor:
     # final shape: (B, L, L, 13)
 
 
+def knn_pair_mask(coords: torch.Tensor, mask: torch.Tensor, k: int) -> torch.Tensor:
+    """
+    (B, L, L) boolean: True where residue j is among residue i's k nearest CA
+    neighbours. This is the ESM3 receptive field, and passing it into the
+    encoder is what makes a residue's description depend on its own local
+    surroundings rather than on the whole chain.
+
+    Nearest in SPACE, not along the sequence. Two residues far apart in the
+    chain can be neighbours if the fold brings them together, which is the
+    whole point of doing it geometrically.
+
+    coords: (B, L, 4, 3)
+    mask:   (B, L)  -- True for real residues
+    """
+    ca = coords[:, :, 1, :]                      # (B, L, 3)
+    dist = torch.cdist(ca, ca)                   # (B, L, L)
+
+    # Padded positions sit at the origin, so without this they look like
+    # plausible neighbours to every real residue and would get selected.
+    dist = dist.masked_fill(~mask.unsqueeze(1), float("inf"))
+
+    k = min(k, dist.shape[-1])
+    idx = dist.topk(k, dim=-1, largest=False).indices   # (B, L, k)
+    out = torch.zeros_like(dist, dtype=torch.bool).scatter_(-1, idx, True)
+
+    # Force the diagonal on. A row with no allowed keys becomes all -inf,
+    # and softmax turns that into NaN which then spreads into the real
+    # residues -- the same failure mode as the zero-padding bug in
+    # geometry.py. Every residue attending to itself makes that impossible.
+    eye = torch.eye(dist.shape[-1], dtype=torch.bool, device=coords.device)
+    return out | eye
+
+
 class GeometricAttentionLayer(nn.Module):
     """
     One layer of attention where the pairwise geometry between residues
@@ -105,11 +138,16 @@ class GeometricAttentionLayer(nn.Module):
             nn.init.xavier_uniform_(layer.weight)
             nn.init.zeros_(layer.bias)
 
-    def forward(self, x: torch.Tensor, pair_feats: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pair_feats: torch.Tensor, mask: torch.Tensor,
+                pair_mask: torch.Tensor = None) -> torch.Tensor:
         """
         x:          (B, L, dim)   -- current per-residue features
         pair_feats: (B, L, L, 13) -- from pairwise_features()
         mask:       (B, L)        -- True for real residues, False for padding
+        pair_mask:  (B, L, L)     -- optional, True where residue i is ALLOWED
+                                     to attend to residue j. None means every
+                                     residue may look at every other, which is
+                                     the default and what the 4096-code run used.
         """
         B, L, dim = x.shape
         x_norm = self.norm(x)
@@ -124,6 +162,10 @@ class GeometricAttentionLayer(nn.Module):
         attn_logits = attn_logits + pair_bias
 
         pad_mask = mask.unsqueeze(1).unsqueeze(1)  # (B, 1, 1, L)
+        if pair_mask is not None:
+            # (B, 1, 1, L) & (B, 1, L, L) broadcasts to (B, 1, L, L): a pair is
+            # allowed only if residue j is real AND j is in i's neighbourhood.
+            pad_mask = pad_mask & pair_mask.unsqueeze(1)
         attn_logits = attn_logits.masked_fill(~pad_mask, float("-inf"))
         attn_weights = attn_logits.softmax(dim=-1)  # (B, H, L, L)
 
@@ -158,8 +200,15 @@ class StructureEncoder(nn.Module):
     into a final per-residue feature vector, ready for VQ quantization.
     """
 
-    def __init__(self, dim: int = 128, num_heads: int = 4, num_layers: int = 4):
+    def __init__(self, dim: int = 128, num_heads: int = 4, num_layers: int = 4,
+                 neighbours: int = 0):
         super().__init__()
+
+        # neighbours = 0 means unrestricted, every residue sees the whole
+        # chain. That is how the 4096-code run was trained, and it stays the
+        # default so old checkpoints keep loading unchanged. Set it to 16 to
+        # train with ESM3's receptive field instead.
+        self.neighbours = neighbours
 
         # Every residue starts from the same learned vector -- there's no
         # sequence information to differentiate them at the input. All
@@ -180,8 +229,13 @@ class StructureEncoder(nn.Module):
         B, L = mask.shape
         pair_feats = pairwise_features(coords)  # (B, L, L, 13), computed once, reused every layer
 
+        # Computed once too, and reused by every layer. The neighbourhood is
+        # defined by the input coordinates, which do not change as features
+        # flow up the stack, so recomputing it per layer would be waste.
+        pair_mask = knn_pair_mask(coords, mask, self.neighbours) if self.neighbours > 0 else None
+
         x = self.initial_embedding.expand(B, L, -1)
         for layer in self.layers:
-            x = layer(x, pair_feats, mask)
+            x = layer(x, pair_feats, mask, pair_mask)
 
         return x

@@ -1,0 +1,7 @@
+# Core
+torch>=2.0
+numpy>=1.24
+
+# Structure parsing and PDB access
+biopython>=1.81
+requests>=2.31
